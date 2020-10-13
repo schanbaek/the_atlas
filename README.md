@@ -13,7 +13,4 @@ The atlas of DROSHA cleavage types and cleavage sites for all human miRNAs
 ".
 
 ## Contents
-1. s1_pri-miRNA_information.ipynb
-2. s2_pri-miRNA_construct.ipynb
-3. s3_input.ipynb
-4. s4_cleavage_products.ipynb
+1. Codes
