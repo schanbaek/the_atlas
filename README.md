@@ -3,11 +3,11 @@
 ## Authors
 Kijun Kim1,2,4, S.Chan Baek1,2,4, Young-Yoon Lee1,2, Carolien Bastiaanssen1,2,3, Jeesoo Kim1,2, Haedong Kim1,2, V. Narry Kim1,2,5
 
-1Center for RNA Research, Institute for Basic Science, Seoul 08826, Korea
-2School of Biological Sciences, Seoul National University, Seoul 08826, Korea
-3Kavli Institute of Nanoscience and Department of Bionanoscience, Delft University of Technology, Delft 2629HZ, the Netherlands
-4These authors contributed equally
-5Lead Contact
+1Center for RNA Research, Institute for Basic Science, Seoul 08826, Korea  
+2School of Biological Sciences, Seoul National University, Seoul 08826, Korea  
+3Kavli Institute of Nanoscience and Department of Bionanoscience, Delft University of Technology, Delft 2629HZ, the Netherlands  
+4These authors contributed equally  
+5Lead Contact  
 
 
 ## Aim
