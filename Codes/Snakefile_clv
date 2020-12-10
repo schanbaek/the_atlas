@@ -1,0 +1,207 @@
+import sys; sys.path.append('/mango/bsc/notebooks')
+import time
+from basic import changename, time_stamp
+from os import listdir
+from Bio import SeqIO
+
+## Samples
+#SAMPLES = [ '1707-rep1', '1707-rep2', '1708-rep1', '1708-rep2', '1707-dn-rep1', '1707-dn-rep2',
+#            '1801-123rep1', '1801-123rep2', '1801-23rep1', '1801-23rep2' ]
+#SAMPLES = [ '1707-rep1', '1707-rep2', '1707-dn-rep1', '1707-dn-rep2' ]
+SAMPLES = [ '1807pcr-rep1', '1807pcr-rep2' ]
+ALLSAMPLES = [ '%s_R%s' % (s,n) for s in SAMPLES for n in '12' ]
+
+## Preprocessing
+TRIM = 70 # Since pri-miRNAs are distinguished by 38 nt from each of 5' and 3' ends, 
+          # reads must be at least 38 + 20 (GG + common) + 6 (Random seq) * 2 = 70
+MINQUAL = 25
+MINQUALIFIED = 80
+ADAPT5_RC = 'GATCGTCGGACTGTAGAACTCTGAAC'
+ADAPT3 = 'TGGAATTCTCGGGTGCCAAGG'
+MINLEN = 40 # 20 (GG + common) + 8 (miR-specific) + 6 (Random seq) * 2 = 40
+COMMON5 = 'GCCTATTCAGTTACAGCG'
+COMMON3_RC = 'GTTGCTAGCTTCAGTACG'
+RANDLEN = 6
+
+## Alignment
+#REFERENCE = 'references/171129_PriSeq_NonOverlap_1851'
+REFERENCE = 'references/200416_construct_1851'
+NCORE = 8
+MULTIMAP = 5
+MAXMM = 2
+MAXSC = 0
+SCOREFUN = 'L,%s,%s' % (-2*MAXSC-6*MAXMM, 2)
+
+## Annotation
+ANNOTATEALL = '/casa/bsc/databases/human/hg38_annotations.bed'
+
+## Log
+DATE = time.strftime('%y%m%d') # 170519
+LOG = 'logs/%s.log' % DATE
+logfile = open(LOG, 'at')
+logfile.write('========== NEW RUN %s ==========\n' % time_stamp())
+logfile.close()
+
+#changename('rawdata/', 'Missed-Clv-', '1807pcr-rep')
+
+rule all:
+    input: #expand('qc/{sample}.qstats.txt.gz', sample=ALLSAMPLES),
+           #expand('qc/{sample}.rnames', sample=SAMPLES),
+           #expand('cuta/{sample}.rnames', sample=SAMPLES),
+           #expand('data/{sample}_col.rnames', sample=SAMPLES),
+           #expand('alignments/{sample}.bam', sample=SAMPLES),
+           expand('alignments/{sample}.uniq.new.sam.gz', sample=SAMPLES),
+           #expand('alignments/{sample}.ambi.mm2.sam.gz', sample=SAMPLES),
+           #'resources_local/eps/done'
+
+
+#####################################################################################
+
+rule list_read_names:
+    input: '{sample}.fa.gz'
+    output: temp('{sample}.rnames')
+    shell: 'zcat {input} | \
+            awk "NR % 2 == 1" - | cut -d " " -f1 - | cut -c 2- - | \
+            sort - > {output}'
+
+
+rule intersect_read_names:
+    input: '{sample}_R1.rnames', '{sample}_R2.rnames'
+    output: '{sample, [^_]+}.rnames'
+    shell: 'comm -12 {input[0]} {input[1]} > {output}'
+
+
+#####################################################################################
+
+
+rule qc_stats:
+    input: 'rawdata/{sample}.fastq.gz'
+    output: 'qc/{sample}.qstats.txt.gz'
+    shell: 'zcat {input} | \
+            fastx_quality_stats -Q 33 - | \
+            gzip -c - > {output}'
+
+
+rule trim:
+    input: 'rawdata/{sample}.fastq.gz'
+    output: temp('rawdata/{sample}.trim.fastq.gz')
+    shell: 'zcat {input} | \
+            fastx_trimmer -Q 33 -l {TRIM} - | \
+            gzip -c - > {output}'
+
+
+rule quality_filter:
+    input: temp('rawdata/{sample}.trim.fastq.gz')
+    output: 'qc/{sample}.fa.gz'
+    shell: 'zcat {input} | \
+            fastq_quality_filter -Q 33 -q {MINQUAL} -p {MINQUALIFIED} - 2>> {LOG} | \
+            fastq_to_fasta -Q 33 -n - | \
+            gzip -c - > {output}'
+
+
+rule cut_illu_adapt3:
+    input: 'qc/{sample}_R1.fa.gz'
+    output: 'cuta/{sample}_R1.fa.gz'
+    shell: 'zcat {input} | \
+            cutadapt -a {ADAPT3} -m {MINLEN} 2>> {LOG} - | \
+            gzip -c - > {output}'
+
+
+rule cut_illu_adapt5:
+    input: 'qc/{sample}_R2.fa.gz'
+    output: 'cuta/{sample}_R2.fa.gz'
+    shell: 'zcat {input} | \
+            cutadapt -a {ADAPT5_RC} -m {MINLEN} 2>> {LOG} - | \
+            gzip -c - > {output}'
+
+rule discard_not_adapted_reads:
+    input: 'cuta/{sample}.fa.gz'
+    output: 'cuta/{sample}_col.fa.gz'
+    run:
+        rnames = 'cuta/%s.rnames' % wildcards.sample[:-len('_R1')]
+        shell('zcat {input} | seqtk subseq - {rnames} | \
+               gzip -c - > {output}')
+
+
+rule list_representative_reads:
+    input: 'cuta/{sample}_R1_col.fa.gz', 'cuta/{sample}_R2_col.fa.gz'
+    output: 'data/{sample}_col.rnames'
+    shell: 'paste -d "" <(zcat {input[0]}) <(zcat {input[1]}) | \
+            cut -d " " -f1 - | paste - - | cut -c 2- - | \
+            sort -k2,2 - | uniq -f1 - | cut -f1 - > {output}'
+
+
+rule drop_PCR_duplicates:
+    input: 'cuta/{sample}_col.fa.gz'
+    output: 'data/{sample}.fa.gz'
+    run: 
+        rnames = 'data/%s_col.rnames' % wildcards.sample[:-len('_R1')]
+        shell('zcat {input} | seqtk subseq - {rnames} | \
+               cutadapt -u {RANDLEN} -u -{RANDLEN} - | \
+               gzip -c - > {output}')
+
+
+rule align_by_bowtie2_local:
+    input: 'data/{sample}_R1.fa.gz', 'data/{sample}_R2.fa.gz'
+    output: 'alignments/{sample}.new.bam'
+    shell: 'bowtie2 -p {NCORE} -f --local --score-min {SCOREFUN} \
+                    --no-mixed --norc --no-discordant -k {MULTIMAP} -x {REFERENCE} \
+                    -1 {input[0]} -2 {input[1]} 2>> {LOG} | \
+            samtools view -bS - > {output}'
+
+
+rule collect_best:
+    input: 'alignments/{sample}.new.bam'
+    output: 'alignments/{sample}.uniq.new.sam.gz'
+    shell: 'samtools view {input} | \
+            awk "{{if (\$2 == 147 && \$5 > 1) {{print \$3,\$4,\$6,\$8}}}}" - | \
+            gzip -c - > {output}'
+
+
+rule collect_ambig:
+    input: 'alignments/{sample}.mm2.bam'
+    output: 'alignments/{sample}.ambi.mm2.sam.gz'
+    shell: 'samtools view -f 147 {input} | \
+            awk "{{if (\$5 == 0 || \$5 == 1) print}}" - | \
+            gzip -c - > {output}'
+
+
+rule make_seq_file:
+    input: 'resources_local/180401_1881pris_mirbase21_125mer.fa'
+    output: 'resources_local/seqs/done'
+    run:
+        shell('touch {output}')
+        for s in SeqIO.parse(input[0], 'fasta'):
+            mir = s.id
+            seq = str(s.seq)
+            out = open('resources_local/seqs/%s.fa'%mir,'wt')
+            out.write('>%s\n%s\n'%(mir,seq))
+            out.close()
+
+rule fold:
+    input: 'resources_local/180401_1881pris_mirbase21_125mer.fa',
+           'resources_local/seqs/done'
+    output: 'resources_local/cts/done'
+    run:
+        shell('touch {output}')
+        for s in SeqIO.parse(input[0], 'fasta'):
+            mir = s.id
+            seqf = 'resources_local/seqs/%s.fa'%mir
+            ctf = 'resources_local/cts/%s.ct'%mir
+            shell('Fold {seqf} {ctf}')
+
+rule pseudoviewer:
+    input: 'resources_local/180401_1881pris_mirbase21_125mer.fa',
+           'resources_local/cts/done'
+    output: 'resources_local/eps/done'
+    run:
+        shell('touch {output}')
+        for s in SeqIO.parse(input[0], 'fasta'):
+            mir = s.id
+            ctf = 'resources_local/cts/%s.ct'%mir
+            shell('pvclient.py --ct {ctf} --structures 5 \
+                               --out resources_local/eps/{mir}_')
+
+
+#
+# vim: et syntax=snakemake

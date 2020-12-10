@@ -1,0 +1,172 @@
+import sys; sys.path.append('/mango/bsc/notebooks')
+import time
+from basic import changename, time_stamp
+from os import listdir
+
+## Samples
+SAMPLES = [ '1807pcr-rep1', '1807pcr-rep2' ]
+ALLSAMPLES = [ '%s_R%s' % (s,n) for s in SAMPLES for n in '12' ]
+
+## Preprocessing
+COMMON5 = 'GCCTATTCAGTTACAGCG'
+COMMON3_RC = 'GTTGCTAGCTTCAGTACG'
+TRIM = 70
+MINQUAL = 25
+MINQUALIFIED = 80
+RANDLEN = 3
+
+## Alignment
+REFERENCE = 'references/171129_PriSeq_NonOverlap_1851'
+MULTIMAP = 5
+MAXMM = 2
+MAXSC = 2
+SCOREFUN = 'L,%s,%s' % (-2*MAXSC-6*MAXMM, 2)
+
+## Log
+DATE = time.strftime('%y%m%d') # 170519
+LOG = 'logs/%s.log' % DATE
+logfile = open(LOG, 'at')
+logfile.write('========== NEW RUN %s ==========\n' % time_stamp())
+logfile.close()
+
+
+#changename('rawdata/', 'Missed-NoEnz-', '1807pcr-rep')
+
+
+rule all:
+    input: #expand('qc/{sample}.qstats.txt.gz', sample=ALLSAMPLES),
+           #expand('qc/{sample}.rnames', sample=SAMPLES),
+           #expand('cuta/{sample}.rnames', sample=SAMPLES),
+           #expand('data/{sample}_col.rnames', sample=SAMPLES),
+           #expand('alignments/{sample}.mm2.bam', sample=SAMPLES),
+           expand('alignments/{sample}.uniq.mm2.txt.gz', sample=SAMPLES),
+           #expand('alignments/{sample}.ambi.mm2.sam.gz', sample=SAMPLES),
+
+
+
+
+#####################################################################################
+
+rule list_read_names:
+    input: '{sample}.fa.gz'
+    output: temp('{sample}.rnames')
+    shell: 'zcat {input} | \
+            awk "NR % 2 == 1" - | cut -d " " -f1 - | cut -c 2- - | \
+            sort - > {output}'
+
+
+rule intersect_read_names:
+    input: '{sample}_R1.rnames', '{sample}_R2.rnames'
+    output: '{sample, [^_]+}.rnames'
+    shell: 'comm -12 {input[0]} {input[1]} > {output}'
+
+
+#####################################################################################
+
+
+rule qc_stats:
+    input: 'rawdata/{sample}.fastq.gz'
+    output: 'qc/{sample}.qstats.txt.gz'
+    shell: 'zcat {input} | \
+            fastx_quality_stats -Q 33 - | \
+            gzip -c - > {output}'
+
+
+rule trim:
+    input: 'rawdata/{sample}.fastq.gz'
+    output: temp('rawdata/{sample}.trim.fastq.gz')
+    shell: 'zcat {input} | \
+            fastx_trimmer -Q 33 -l {TRIM} - | \
+            gzip -c - > {output}'
+
+
+rule quality_filter:
+    input: temp('rawdata/{sample}.trim.fastq.gz')
+    output: 'qc/{sample}.fa.gz'
+    shell: 'zcat {input} | \
+            fastq_quality_filter -Q 33 -q {MINQUAL} -p {MINQUALIFIED} - 2>> {LOG} | \
+            fastq_to_fasta -Q 33 -n - | \
+            gzip -c - > {output}'
+
+
+rule collect_common5:
+    input: 'qc/{sample}_R1.fa.gz'
+    output: 'cuta/{sample}_R1.fa.gz'
+    shell: 'zcat {input} | \
+            cutadapt -g {COMMON5} --trimmed-only --no-trim 2>> {LOG} - | \
+            gzip -c - > {output}'
+
+
+rule collect_common3:
+    input: 'qc/{sample}_R2.fa.gz'
+    output: 'cuta/{sample}_R2.fa.gz'
+    shell: 'zcat {input} | \
+            cutadapt -g {COMMON3_RC} --trimmed-only --no-trim 2>> {LOG} - | \
+            gzip -c - > {output}'
+
+
+rule collect_full_length:
+    input: 'cuta/{sample}.fa.gz'
+    output: 'cuta/{sample}_col.fa.gz'
+    run:
+        rnames = 'cuta/%s.rnames' % wildcards.sample[:-len('_R1')]
+        shell('zcat {input} | seqtk subseq - {rnames} | \
+               gzip -c - > {output}')
+
+
+rule list_representative_reads:
+    input: 'cuta/{sample}_R1_col.fa.gz', 'cuta/{sample}_R2_col.fa.gz'
+    output: 'data/{sample}_col.rnames'
+    shell: 'paste -d "" <(zcat {input[0]}) <(zcat {input[1]}) | \
+            cut -d " " -f1 - | paste - - | cut -c 2- - | \
+            sort -k2,2 - | uniq -f1 - | cut -f1 - > {output}'
+
+
+rule drop_PCR_duplicates:
+    input: 'cuta/{sample}.fa.gz'
+    output: 'data/{sample}.fa.gz'
+    run: 
+        #rnames = 'data/%s_col.rnames' % wildcards.sample[:-len('_R1')]
+        rnames = 'cuta/%s.rnames' % wildcards.sample[:-len('_R1')]
+        shell('zcat {input} | seqtk subseq - {rnames} | \
+               cutadapt -u {RANDLEN} - | \
+               gzip -c - > {output}')
+
+
+rule align_by_bowtie2:
+    input: 'data/{sample}_R1.fa.gz', 'data/{sample}_R2.fa.gz'
+    output: 'alignments/{sample}.mm2.bam'
+    shell: 'bowtie2 -p 4 -f --local --score-min {SCOREFUN} --no-mixed --no-discordant --norc \
+            -k {MULTIMAP} -x {REFERENCE} -1 {input[0]} -2 {input[1]} 2>> {LOG} | \
+            samtools view -bS - > {output}'
+
+
+rule select_uniq:
+    input: 'alignments/{sample}.mm2.bam'
+    output: 'alignments/{sample}.uniq.mm2.txt.gz'
+    shell: 'samtools view {input} | \
+            awk "{{if (\$2 == 147 && \$5 > 1) {{print \$1,\$2,\$3,\$4,\$6,\$8}}}}" - | \
+            gzip -c - > {output}'
+
+
+rule select_multiple_best_hits:
+    input: 'alignments/{sample}.mm2.bam'
+    output: 'alignments/{sample}.ambi.mm2.sam.gz'
+    shell: 'samtools view -f 147 {input} | \
+            awk "{{if (\$5 == 0 || \$5 == 1) print}}" - | \
+            gzip -c - > {output}'
+
+
+rule rescue_uniq_reads:
+    input: 'alignments/{sample}.excl.sam2.gz'
+    output: 'alignments/{sample}.rescue.sam2.gz'
+    shell: 'zcat {input} | \
+            sort -k 1,1 | \
+            cut -f 1-9 | rev | \
+            uniq -f 8 -u | rev | \
+            gzip -c - > {output}'
+
+
+#
+#
+# vim: et syntax=snakemake
